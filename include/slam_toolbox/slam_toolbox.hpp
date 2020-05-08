@@ -18,40 +18,24 @@
 /* Author: Brian Gerkey */
 /* Heavily Modified: Steven Macenski */
 
-#include <ros/ros.h>
-#include <ros/console.h>
-#include <message_filters/subscriber.h>
-#include <tf/transform_broadcaster.h>
-#include <tf/transform_listener.h>
-#include <tf/message_filter.h>
-#include <tf/LinearMath/Matrix3x3.h>
-#include <tf/transform_datatypes.h>
-#include <visualization_msgs/MarkerArray.h>
-#include <visualization_msgs/InteractiveMarker.h>
-#include <visualization_msgs/InteractiveMarkerControl.h> 
-#include <visualization_msgs/InteractiveMarkerFeedback.h>
+#include "ros/ros.h"
+#include "message_filters/subscriber.h"
+#include "tf/transform_broadcaster.h"
+#include "tf/transform_listener.h"
+#include "tf/message_filter.h"
+#include "tf/LinearMath/Matrix3x3.h"
+#include "tf/transform_datatypes.h"
 
-#include <interactive_markers/interactive_marker_server.h>
-#include <interactive_markers/menu_handler.h>
-#include <pluginlib/class_loader.h>
+#include "interactive_markers/interactive_marker_server.h"
+#include "interactive_markers/menu_handler.h"
+#include "pluginlib/class_loader.h"
 
-#include <nav_msgs/MapMetaData.h>
-#include <sensor_msgs/LaserScan.h>
-#include <nav_msgs/GetMap.h>
-#include <geometry_msgs/PoseWithCovarianceStamped.h>
-
-#include "karto_sdk/Mapper.h"
-
-#include <boost/thread.hpp>
-
-#include "slam_toolbox/Pause.h"
-#include "slam_toolbox/ClearQueue.h"
-#include "slam_toolbox/ToggleInteractive.h"
-#include "slam_toolbox/Clear.h"
-#include "slam_toolbox/SaveMap.h"
-#include "slam_toolbox/LoopClosure.h"
-#include "slam_toolbox/SerializePoseGraph.h"
-#include "slam_toolbox/DeserializePoseGraph.h"
+#include "slam_toolbox/toolbox_types.hpp"
+#include "slam_toolbox/mapper_utils.hpp"
+#include "slam_toolbox/snap_utils.hpp"
+#include "slam_toolbox/laser_utils.hpp"
+#include "slam_toolbox/pose_utils.hpp"
+#include "slam_toolbox/map_saver.hpp"
 
 #include <string>
 #include <map>
@@ -59,51 +43,14 @@
 #include <queue>
 #include <cstdlib>
 #include <fstream>
-#include <sys/resource.h>
+#include <boost/thread.hpp>
 
-#include <boost/archive/text_oarchive.hpp>
-#include <boost/archive/text_iarchive.hpp>
-#include <boost/serialization/vector.hpp>
-
-// compute linear index for given map coords
-#define MAP_IDX(sx, i, j) ((sx) * (j) + (i))
-
-struct posed_scan
+namespace slam_toolbox
 {
-  posed_scan(sensor_msgs::LaserScan::ConstPtr scan_in, karto::Pose2 pose_in) :
-             scan(scan_in), pose(pose_in) 
-  {
-  }
-  sensor_msgs::LaserScan::ConstPtr scan;
-  karto::Pose2 pose;
-};
 
-enum PausedApplication
-{
-  PROCESSING = 0,
-  VISUALIZING_GRAPH = 1,
-  NEW_MEASUREMENTS = 2
-};
-
-enum ProcessType
-{
-  PROCESS = 0,
-  PROCESS_FIRST_NODE = 1,
-  PROCESS_NEAR_REGION = 2,
-  PROCESS_LOCALIZATION = 3
-};
-
-tf::Pose KartoPose2TfPose(const karto::Pose2& pose)
-{
-  tf::Pose new_pose;
-  new_pose.setOrigin(tf::Vector3(pose.GetX(), pose.GetY(), 0.));
-  new_pose.setRotation(tf::createQuaternionFromYaw(pose.GetHeading()));
-  return new_pose;
-};
-
-typedef std::map<karto::Name, std::vector<karto::Vertex<karto::LocalizedRangeScan>*>> VerticeMap;
-typedef std::vector<karto::Edge<karto::LocalizedRangeScan>*> EdgeVector;
-typedef std::vector<karto::Vertex<karto::LocalizedRangeScan>*> ScanVector;
+// dirty, dirty cheat I love
+using namespace ::toolbox_types;
+using namespace ::pose_utils;
 
 class SlamToolbox
 {
@@ -115,7 +62,7 @@ private:
   // threads
   void Run();
   void PublishVisualizations();
-  void PublishTransformLoop(double transform_publish_period);
+  void PublishTransformLoop(const double& transform_publish_period);
 
   // setup
   void SetParams(ros::NodeHandle& nh);
@@ -126,20 +73,12 @@ private:
   void LaserCallback(const sensor_msgs::LaserScan::ConstPtr& scan);
   bool MapCallback(nav_msgs::GetMap::Request  &req,
                    nav_msgs::GetMap::Response &res);
-  bool PauseProcessingCallback(slam_toolbox::Pause::Request& req,
-                     slam_toolbox::Pause::Response& resp);
-  bool PauseNewMeasurementsCallback(slam_toolbox::Pause::Request& req,
-                     slam_toolbox::Pause::Response& resp);
   bool ClearQueueCallback(slam_toolbox::ClearQueue::Request& req,
                           slam_toolbox::ClearQueue::Response& resp);
   bool InteractiveCallback(slam_toolbox::ToggleInteractive::Request  &req,
                            slam_toolbox::ToggleInteractive::Response &resp);
   bool ClearChangesCallback(slam_toolbox::Clear::Request  &req,
                             slam_toolbox::Clear::Response &resp);
-  bool SaveMapCallback(slam_toolbox::SaveMap::Request  &req,
-                       slam_toolbox::SaveMap::Response &resp);
-  bool ManualLoopClosureCallback(slam_toolbox::LoopClosure::Request  &req,
-                                 slam_toolbox::LoopClosure::Response &resp);
   bool SerializePoseGraphCallback(slam_toolbox::SerializePoseGraph::Request  &req,
                                   slam_toolbox::SerializePoseGraph::Response &resp);
   bool DeserializePoseGraphCallback(slam_toolbox::DeserializePoseGraph::Request &req,
@@ -147,35 +86,42 @@ private:
   void LocalizePoseCallback(const geometry_msgs::PoseWithCovarianceStampedConstPtr& msg);
 
   // functional bits
-  bool GetOdomPose(karto::Pose2& karto_pose, const ros::Time& t);
   karto::LaserRangeFinder* GetLaser(const sensor_msgs::LaserScan::ConstPtr& scan);
   bool AddScan(karto::LaserRangeFinder* laser,
                const sensor_msgs::LaserScan::ConstPtr& scan,
                karto::Pose2& karto_pose);
   bool UpdateMap();
   void PublishGraph();
+
+  // TODO loop closure util
+  bool ManualLoopClosureCallback(slam_toolbox::LoopClosure::Request  &req,
+                                 slam_toolbox::LoopClosure::Response &resp);
   void MoveNode(const int& id, const Eigen::Vector3d& pose, const bool correct = true);
   void ProcessInteractiveFeedback(const visualization_msgs::InteractiveMarkerFeedbackConstPtr& feedback);
   void ClearMovedNodes();
   void AddMovedNodes(const int& id, Eigen::Vector3d vec);
 
-  // state
+  // TODO state helper
   bool IsPaused(const PausedApplication& app);
-
+  bool PauseProcessingCallback(slam_toolbox::Pause::Request& req,
+                     slam_toolbox::Pause::Response& resp);
+  bool PauseNewMeasurementsCallback(slam_toolbox::Pause::Request& req,
+                     slam_toolbox::Pause::Response& resp);
 
   // ROS-y-ness
   ros::NodeHandle nh_;
-  tf::TransformListener tf_;
-  tf::TransformBroadcaster* tfB_;
-  message_filters::Subscriber<sensor_msgs::LaserScan>* scan_filter_sub_;
+  std::unique_ptr<tf::TransformListener> tf_;
+  std::unique_ptr<tf::TransformBroadcaster> tfB_;
+  std::unique_ptr<message_filters::Subscriber<sensor_msgs::LaserScan> > scan_filter_sub_;
   ros::Subscriber localization_pose_sub_;
-  tf::MessageFilter<sensor_msgs::LaserScan>* scan_filter_;
+  std::unique_ptr<tf::MessageFilter<sensor_msgs::LaserScan> > scan_filter_;
   ros::Publisher sst_, sstm_, marker_publisher_, scan_publisher_;
-  ros::ServiceServer ssMap_, ssClear_, ssInteractive_, ssLoopClosure_, ssPause_processing_, ssPause_measurements_, ssClear_manual_, ssSave_map_, ssSerialize_, ssLoadMap_;
+  ros::ServiceServer ssMap_, ssClear_, ssInteractive_, ssLoopClosure_, ssPause_measurements_, ssClear_manual_, ssSerialize_, ssLoadMap_;
+
   nav_msgs::GetMap::Response map_;
 
   // Storage for ROS parameters
-  std::string odom_frame_, map_frame_, base_frame_, laser_frame_;
+  std::string odom_frame_, map_frame_, base_frame_, laser_frame_, map_name_;
   int throttle_scans_;
   ros::Duration transform_timeout_;
   double resolution_, minimum_time_interval_, minimum_travel_distance_;
@@ -184,25 +130,31 @@ private:
   geometry_msgs::Pose2D process_near_region_pose_;
   tf::Transform reprocessing_transform_;
 
-  // Karto bookkeeping
-  karto::Mapper* mapper_;
-  karto::Dataset* dataset_;
-  std::map<std::string, karto::LaserRangeFinder*> lasers_;
-  std::map<std::string, bool> lasers_inverted_;
+  // Book keeping
+  std::unique_ptr<karto::Mapper> mapper_;
+  std::unique_ptr<karto::Dataset> dataset_;
+  std::map<std::string, laser_utils::LaserMetadata> lasers_;
+
+  // helpers
+  std::unique_ptr<laser_utils::LaserAssistant> laser_assistant_;
+  std::unique_ptr<pose_utils::GetPoseHelper> pose_helper_;
+  std::unique_ptr<map_saver::MapSaver> map_saver_;
 
   // Internal state
-  boost::thread *transform_thread_, *run_thread_, *visualization_thread_;
+  std::unique_ptr<boost::thread> transform_thread_, run_thread_, visualization_thread_;
   tf::Transform map_to_odom_;
   bool inverted_laser_, pause_graph_, pause_processing_, pause_new_measurements_, interactive_mode_, localization_pose_set_;
-  std::queue<posed_scan> q_;
+  std::queue<posedScan> q_;
   boost::mutex map_mutex_, pause_mutex_, map_to_odom_mutex_, mapper_mutex_, interactive_mutex_, moved_nodes_mutex_;
 
   // visualization
-  interactive_markers::InteractiveMarkerServer* interactive_server_;
+  std::unique_ptr<interactive_markers::InteractiveMarkerServer> interactive_server_;
   std::map<int, Eigen::Vector3d> moved_nodes_;
-  std::vector<sensor_msgs::LaserScan> current_scans_;
+  std::unique_ptr<std::vector<sensor_msgs::LaserScan> > current_scans_;
 
   // pluginlib
   pluginlib::ClassLoader<karto::ScanSolver> solver_loader_;
   boost::shared_ptr<karto::ScanSolver> solver_;
 };
+
+} // end namespace

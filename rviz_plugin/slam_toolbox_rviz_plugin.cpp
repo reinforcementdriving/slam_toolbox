@@ -17,7 +17,7 @@
 /* Author: Steven Macenski */
 
 // Header
-#include "slam_toolbox_rviz_plugin.hpp"
+#include "slam_toolbox_rviz_plugin.h"
 // QT
 #include <QPushButton>
 #include <QCheckBox>
@@ -28,6 +28,9 @@
 #include <QtGui>
 #include <QLabel>
 #include <QFrame>
+
+#include <pluginlib/class_list_macros.h>
+PLUGINLIB_EXPORT_CLASS(slam_toolbox::SlamToolboxPlugin, rviz::Panel)
 
 namespace slam_toolbox
 {
@@ -40,9 +43,8 @@ SlamToolboxPlugin::SlamToolboxPlugin(QWidget* parent):
 /*****************************************************************************/    
 {
   ros::NodeHandle nh;
-  bool paused_measure = false, paused_process = false, interactive = false;
+  bool paused_measure = false, interactive = false;
   nh.getParam("/slam_toolbox/paused_new_measurements", paused_measure);
-  nh.getParam("/slam_toolbox/paused_processing", paused_process);
   nh.getParam("/slam_toolbox/interactive_mode", interactive);
   _serialize = nh.serviceClient<slam_toolbox::SerializePoseGraph>("/slam_toolbox/serialize_map");
   _load_map = nh.serviceClient<slam_toolbox::DeserializePoseGraph>("/slam_toolbox/deserialize_map");
@@ -51,7 +53,6 @@ SlamToolboxPlugin::SlamToolboxPlugin(QWidget* parent):
   _saveMap = nh.serviceClient<slam_toolbox::SaveMap>("/slam_toolbox/save_map");
   _clearQueue = nh.serviceClient<slam_toolbox::ClearQueue>("/slam_toolbox/clear_queue");
   _interactive = nh.serviceClient<slam_toolbox::ToggleInteractive>("/slam_toolbox/toggle_interactive_mode");
-  _pause_processing = nh.serviceClient<slam_toolbox::Pause>("/slam_toolbox/pause_processing");
   _pause_measurements = nh.serviceClient<slam_toolbox::Pause>("/slam_toolbox/pause_new_measurements");
   _load_submap_for_merging = nh.serviceClient<slam_toolbox::AddSubmap>("/map_merging/add_submap");
   _merge = nh.serviceClient<slam_toolbox::MergeMaps>("/map_merging/merge_submaps");
@@ -101,8 +102,6 @@ SlamToolboxPlugin::SlamToolboxPlugin(QWidget* parent):
   _label1->setText("Interactive Mode");
   _label2 = new QLabel(this);
   _label2->setText("Accept New Scans");
-  _label3 = new QLabel(this);
-  _label3->setText("Process Scans");
   _label4 = new QLabel(this);
   _label4->setText("Merge Map Tool");
   _label4->setAlignment(Qt::AlignCenter);
@@ -125,9 +124,6 @@ SlamToolboxPlugin::SlamToolboxPlugin(QWidget* parent):
   _check2 = new QCheckBox();
   _check2->setChecked(!paused_measure);
   connect(_check2, SIGNAL(stateChanged(int)), this, SLOT(PauseMeasurementsCb(int)));
-  _check3 = new QCheckBox();
-  _check3->setChecked(!paused_process);
-  connect(_check3, SIGNAL(stateChanged(int)), this, SLOT(PauseProcessingCb(int)));
   _radio1 = new QRadioButton(tr("Start At Dock"));
   _radio1->setChecked(true);
   _radio2 = new QRadioButton(tr("Start At Pose Est."));
@@ -157,7 +153,6 @@ SlamToolboxPlugin::SlamToolboxPlugin(QWidget* parent):
   _button8->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   _check1->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   _check2->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  _check3->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   _line1->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   _line2->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   _line3->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -170,8 +165,6 @@ SlamToolboxPlugin::SlamToolboxPlugin(QWidget* parent):
   _hbox1->addWidget(_label1);
   _hbox1->addWidget(_check2);
   _hbox1->addWidget(_label2);
-  _hbox1->addWidget(_check3);
-  _hbox1->addWidget(_label3);
 
   _hbox2->addWidget(_button1);
   _hbox2->addWidget(_button2);
@@ -250,33 +243,37 @@ void SlamToolboxPlugin::SerializeMap()
 void SlamToolboxPlugin::DeserializeMap()
 /*****************************************************************************/
 {
+  typedef slam_toolbox::DeserializePoseGraph::Request procType;
+
   slam_toolbox::DeserializePoseGraph msg;
   msg.request.filename = _line4->text().toStdString();
   if (_match_type == PROCESS_FIRST_NODE_CMT)
   {
-    msg.request.match_type = slam_toolbox::DeserializePoseGraph::Request::START_AT_FIRST_NODE;
+    msg.request.match_type = procType::START_AT_FIRST_NODE;
   }
   else if (_match_type == PROCESS_NEAR_REGION_CMT)
   {
-    msg.request.match_type = slam_toolbox::DeserializePoseGraph::Request::START_AT_GIVEN_POSE;
+    msg.request.match_type = procType::START_AT_GIVEN_POSE;
     msg.request.initial_pose.x = std::stod(_line5->text().toStdString());
     msg.request.initial_pose.y = std::stod(_line6->text().toStdString());
     msg.request.initial_pose.theta = std::stod(_line7->text().toStdString());
   }
   else if (_match_type == LOCALIZE_CMT)
   {
-    msg.request.match_type = slam_toolbox::DeserializePoseGraph::Request::LOCALIZE_AT_POSE;
+    msg.request.match_type = procType::LOCALIZE_AT_POSE;
     msg.request.initial_pose.x = std::stod(_line5->text().toStdString());
     msg.request.initial_pose.y = std::stod(_line6->text().toStdString());
     msg.request.initial_pose.theta = std::stod(_line7->text().toStdString());
   }
   else
   {
-    msg.request.match_type = slam_toolbox::DeserializePoseGraph::Request::START_WHERE_ODOMETRY_LEFT_OFF;
+    ROS_WARN("No match type selected, cannot send request.");
+    return;
   }
   if (!_load_map.call(msg))
   {
-     ROS_WARN("SlamToolbox: Failed to deserialize mapper object from file, is service running?");
+     ROS_WARN("SlamToolbox: Failed to deserialize mapper object "
+      "from file, is service running?");
   }
 }
 
@@ -361,17 +358,6 @@ void SlamToolboxPlugin::InteractiveCb(int state)
 }
 
 /*****************************************************************************/
-void SlamToolboxPlugin::PauseProcessingCb(int state)
-/*****************************************************************************/
-{
-  slam_toolbox::Pause msg;
-  if (!_pause_processing.call(msg))
-  {
-    ROS_WARN("SlamToolbox: Failed to toggle pause processing, is service running?");
-  }
-}
-
-/*****************************************************************************/
 void SlamToolboxPlugin::PauseMeasurementsCb(int state)
 /*****************************************************************************/
 {
@@ -450,11 +436,10 @@ void SlamToolboxPlugin::updateCheckStateIfExternalChange()
 {
   ros::Rate r(1); //1 hz
   ros::NodeHandle nh;
-  bool paused_measure = false, paused_process = false, interactive = false;
+  bool paused_measure = false, interactive = false;
   while (ros::ok())
   {
     nh.getParam("/slam_toolbox/paused_new_measurements", paused_measure);
-    nh.getParam("/slam_toolbox/paused_processing", paused_process);
     nh.getParam("/slam_toolbox/interactive_mode", interactive);
 
     bool oldState = _check1->blockSignals(true);
@@ -465,15 +450,8 @@ void SlamToolboxPlugin::updateCheckStateIfExternalChange()
     _check2->setChecked(!paused_measure);
     _check2->blockSignals(oldState);
 
-    oldState = _check3->blockSignals(true);
-    _check3->setChecked(!paused_process);
-    _check3->blockSignals(oldState);
-
     r.sleep();
   }
 }
 
 } // end namespace
-
-#include <pluginlib/class_list_macros.h>
-PLUGINLIB_EXPORT_CLASS(slam_toolbox::SlamToolboxPlugin, rviz::Panel)
